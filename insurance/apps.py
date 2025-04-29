@@ -8,6 +8,9 @@ class InsuranceConfig(AppConfig):
     name = 'insurance'
     
     def ready(self):
+        # Import signals first to ensure they are registered
+        import insurance.signals 
+
         # Skip during migrations, tests, etc.
         if 'runserver' not in sys.argv and 'accrue_interest' not in sys.argv:
             return
