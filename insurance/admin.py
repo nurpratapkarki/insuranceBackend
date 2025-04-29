@@ -1,14 +1,34 @@
 from django.contrib import admin
 from django.utils.html import format_html
-
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
 from insurance.models import (
     Occupation, MortalityRate, Company, Branch, InsurancePolicy, GSVRate, SSVConfig,
     AgentApplication, SalesAgent, DurationFactor, Customer, KYC, PolicyHolder,
     BonusRate, Bonus, ClaimRequest, ClaimProcessing, PaymentProcessing, Underwriting,
-    PremiumPayment, AgentReport, Loan, LoanRepayment
+    PremiumPayment, AgentReport, Loan, LoanRepayment, User
 )
 
+@admin.register(User)
+class UserAdmin(BaseUserAdmin):
+    list_display = ('id', 'username', 'email', 'first_name', 'last_name', 'user_type', 'is_active', 'is_staff')
+    list_filter = ('is_active', 'is_staff', 'user_type')
+    search_fields = ('username', 'email', 'first_name', 'last_name')
+    ordering = ('username',)
+    fieldsets = (
+        (None, {'fields': ('username', 'password')}),
+        (('Personal info'), {'fields': ('first_name', 'last_name', 'email', 'phone', 'address', 'gender')}),
+        (('User type'), {'fields': ('user_type', 'branch', 'agent')}),
+        (('Permissions'), {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
+        (('Important dates'), {'fields': ('last_login', 'created_at', 'updated_at')}),
+    )
+    add_fieldsets = (
+        (None, {
+            'classes': ('wide',),
+            'fields': ('username', 'email', 'password1', 'password2', 'first_name', 'last_name', 'user_type'),
+        }),
+    )
+    readonly_fields = ('created_at', 'updated_at')
 @admin.register(Occupation)
 class OccupationAdmin(admin.ModelAdmin):
     list_display = ('name', 'risk_category')
@@ -53,9 +73,23 @@ class CompanyAdmin(admin.ModelAdmin):
 
 @admin.register(Branch)
 class BranchAdmin(admin.ModelAdmin):
-    list_display = ('name', 'branch_code', 'location', 'company')
-    search_fields = ('name', 'branch_code', 'location')
+    list_display = ('name', 'branch_code', 'location', 'company', 'get_user_username')
+    search_fields = ('name', 'branch_code', 'location', 'user__username')
     list_filter = ('company',)
+    raw_id_fields = ('user',)
+    autocomplete_fields = ['user']
+
+    def get_user_username(self, obj):
+        if obj.user:
+            return obj.user.username
+        return None
+    get_user_username.short_description = 'Branch Admin User'
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        if 'user' in form.base_fields:
+            form.base_fields['user'].queryset = User.objects.filter(user_type='branch')
+        return form
 
 class GSVRateInline(admin.StackedInline):
     model = GSVRate
@@ -169,13 +203,24 @@ class PolicyHolderInline(admin.StackedInline):
     verbose_name_plural = 'policies'
 
 # --- Main Customer Admin ---
+
 @admin.register(Customer)
 class CustomerAdmin(admin.ModelAdmin):
-    list_display = ('id','first_name', 'last_name', 'phone_number', 'address', 'username')
-    search_fields = ('first_name', 'last_name', 'phone_number','username')
-    list_filter = ('gender',)
-
+    list_display = ('id', 'get_full_name', 'email', 'phone_number', 'get_user_username', 'created_at')
+    list_filter = ('created_at', 'gender')
+    search_fields = ('first_name', 'last_name', 'email', 'phone_number')
+    readonly_fields = ('created_at', 'updated_at')
     inlines = [KYCInline, PolicyHolderInline,BonusInline]
+
+    def get_full_name(self, obj):
+        return f"{obj.first_name} {obj.last_name}"
+    get_full_name.short_description = 'Full Name'
+    
+    def get_user_username(self, obj):
+        if obj.user:
+            return obj.user.username
+        return None
+    get_user_username.short_description = 'Username'
 
 @admin.register(BonusRate)
 class BonusRateAdmin(admin.ModelAdmin):

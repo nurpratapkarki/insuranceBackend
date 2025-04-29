@@ -1,16 +1,119 @@
 from datetime import date
 from decimal import Decimal
 import re
+from rest_framework.authtoken.models import Token
+from django.db.models.signals import post_save  
 from typing import Dict, Union
+from django.dispatch import receiver
 from django.utils.timezone import now
-
 from django.db import models
 from django.contrib.auth.hashers import make_password, check_password
 from django.db.models import Sum
 from django.core.exceptions import ValidationError
-
 from insurance.constant import DOCUMENT_TYPES, EMPLOYEE_STATUS_CHOICES, EXE_FREQ_CHOICE, GENDER_CHOICES, PAYMENT_CHOICES, POLICY_TYPES, PROCESSING_STATUS_CHOICES, PROVINCE_CHOICES, RISK_CHOICES, STATUS_CHOICES
+from django.contrib.auth.models import (
+    AbstractBaseUser,
+    BaseUserManager,
+    PermissionsMixin,
+)
+class UserManager(BaseUserManager):
+    def create_user(self, username, email, password=None, **extra_fields):
+        if not email:
+            raise ValueError("Users must have an email address")
+        if not username:
+            raise ValueError("Users must have a username")
 
+        email = self.normalize_email(email)
+        user = self.model(username=username, email=email, **extra_fields)
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
+
+    def create_superuser(self, username, email, password=None, **extra_fields):
+        extra_fields.setdefault("is_staff", True)
+        extra_fields.setdefault("is_superuser", True)
+        extra_fields.setdefault("user_type", "superadmin")
+
+        if extra_fields.get("is_staff") is not True:
+            raise ValueError("Superuser must have is_staff=True.")
+        if extra_fields.get("is_superuser") is not True:
+            raise ValueError("Superuser must have is_superuser=True.")
+
+        return self.create_user(username, email, password, **extra_fields)
+
+class User(AbstractBaseUser, PermissionsMixin):
+    USER_TYPE_CHOICES = [
+        ('superadmin', 'Super Admin'),
+        ('branch', 'Branch Admin'),
+        ('agent', 'Sales Agent'),
+        ('customer', 'Customer'),
+    ]
+    id = models.BigAutoField(primary_key=True)
+    username = models.CharField(max_length=150, unique=True)
+    first_name = models.CharField(max_length=30)
+    last_name = models.CharField(max_length=30)
+    email = models.EmailField(unique=True)
+    gender = models.CharField(max_length=10, choices=GENDER_CHOICES, default="Male", blank=True)
+    phone = models.CharField(max_length=15, blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    user_type = models.CharField(max_length=20, choices=USER_TYPE_CHOICES, default='customer')
+    branch = models.ForeignKey('Branch', on_delete=models.SET_NULL, null=True, blank=True, related_name='branch_users')
+    agent = models.OneToOneField('SalesAgent', on_delete=models.SET_NULL, null=True, blank=True, related_name='agent_user')
+    
+    # Fix reverse relationship clash
+    groups = models.ManyToManyField(
+        'auth.Group',
+        verbose_name='groups',
+        blank=True,
+        help_text='The groups this user belongs to.',
+        related_name='insurance_user_set',
+        related_query_name='insurance_user',
+    )
+    user_permissions = models.ManyToManyField(
+        'auth.Permission',
+        verbose_name='user permissions',
+        blank=True,
+        help_text='Specific permissions for this user.',
+        related_name='insurance_user_set',
+        related_query_name='insurance_user',
+    )
+
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = UserManager()
+
+    USERNAME_FIELD = "username"
+    EMAIL_FIELD = "email"
+    REQUIRED_FIELDS = ["email", "first_name", "last_name"]
+
+    def __str__(self):
+        return self.username
+
+    def set_password(self, raw_password):
+        self.password = make_password(raw_password)
+
+    def check_password(self, raw_password):
+        return check_password(raw_password, self.password)
+
+    class Meta:
+        verbose_name = "User"
+        verbose_name_plural = "Users"
+        ordering = ["username"]
+
+    def get_full_name(self):
+        return f"{self.first_name} {self.last_name}"
+
+    def get_short_name(self):
+        return self.first_name
+
+@receiver(post_save, sender=User)
+def create_auth_token(sender, instance=None, created=False, **kwargs):
+    if created:
+        Token.objects.create(user=instance)
 
 #ocupation Model
 
@@ -68,6 +171,7 @@ class Company(models.Model):
 class Branch(models.Model):
     name = models.CharField(max_length=255)
     branch_code = models.IntegerField(unique=True, default=1)
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='branch_user', null=True, blank=True)
     location = models.CharField(max_length=255, null=True, blank=True)
     company = models.ForeignKey(
         Company, on_delete=models.CASCADE, related_name="branches", default=1
@@ -395,46 +499,64 @@ class Customer(models.Model):
     first_name = models.CharField(max_length=200)
     middle_name = models.CharField(max_length=50, null=True, blank=True)
     last_name = models.CharField(max_length=50)
-    username = models.CharField(max_length=50, unique=True)
-    password = models.CharField(max_length=128)  # Increased max length for the hash
+    # Change related_name to resolve the clash
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='customer_profile', null=True, blank=True)
     email = models.EmailField(max_length=200, unique=True)
     phone_number = models.CharField(max_length=15, null=True, blank=True)
     address = models.CharField(max_length=200)
+    profile_picture = models.ImageField(upload_to='profile_pictures/', blank=True, null=True)
     gender = models.CharField(
         max_length=1,
         blank=True,
         null=True,
         choices=[("M", "Male"), ("F", "Female"), ("O", "Other")],
     )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"{self.first_name} {self.last_name}"
+    
+    def save(self, *args, **kwargs):
+        creating = self.pk is None and self.user is None
+        
+        # Ensure email exists before proceeding
+        if not self.email:
+            raise ValueError("Customer must have an email address to create a user.")
 
+        super().save(*args, **kwargs)
+        
+        if creating:
+            # Generate username from email prefix
+            username_prefix = self.email.split('@')[0]
+            # Ensure username is unique. If not, append customer ID.
+            # This is a simple approach; more robust uniqueness might be needed.
+            username = username_prefix
+            counter = 1
+            while User.objects.filter(username=username).exists():
+                username = f"{username_prefix}_{counter}"
+                counter += 1
+
+            user = User.objects.create_user(
+                username=username, # Use generated username
+                email=self.email,
+                password=None, # No password set by default
+                first_name=self.first_name,
+                last_name=self.last_name,
+                user_type='customer',
+                phone=self.phone_number,
+                address=self.address
+            )
+            
+            self.user = user
+            self.save(update_fields=['user']) # Save the user reference back to customer
+    
     class Meta:
         verbose_name = "Customer"
         verbose_name_plural = "Customers"
         indexes = [
-            models.Index(fields=["username"]),
             models.Index(fields=["email"]),
         ]
-
-    def save(self, *args, **kwargs):
-        # Hash the password if it's a new customer or if the password field has changed
-        if not self.pk or self.has_changed('password'):
-            self.password = make_password(self.password)
-        super().save(*args, **kwargs)
-
-    def check_password(self, raw_password):
-        """Check the password against the hashed password."""
-        return check_password(raw_password, self.password)
-
-    def has_changed(self, field_name):
-        """Checks if a specific field has changed."""
-        if not self.pk:
-            return True  # Object is new, so all fields are considered changed
-        old_value = getattr(self.__class__.objects.get(pk=self.pk), field_name)
-        return not getattr(self, field_name) == old_value
-    
 #Kyc Model
 class KYC(models.Model):
     customer = models.OneToOneField(Customer, on_delete=models.CASCADE, related_name="kyc")

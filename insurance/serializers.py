@@ -1,12 +1,19 @@
 from rest_framework import serializers
+from rest_framework.validators import UniqueValidator
 from django.contrib.auth.hashers import make_password
 from insurance.models import (
     Occupation, MortalityRate, Company, Branch, InsurancePolicy, GSVRate, SSVConfig,
     AgentApplication, SalesAgent, DurationFactor, Customer, KYC, PolicyHolder,
     BonusRate, Bonus, ClaimRequest, ClaimProcessing, PaymentProcessing, Underwriting,
-    PremiumPayment, AgentReport, Loan, LoanRepayment
+    PremiumPayment, AgentReport, Loan, LoanRepayment, User
 )
 
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = '__all__'
+        read_only_fields = ('last_login', 'created_at', 'updated_at')
 class OccupationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Occupation
@@ -24,10 +31,13 @@ class CompanySerializer(serializers.ModelSerializer):
 
 class BranchSerializer(serializers.ModelSerializer):
     company_name = serializers.ReadOnlyField(source='company.name')
+    user_details = UserSerializer(source='user', read_only=True)
+    user = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(user_type='branch'), required=False, allow_null=True)
     
     class Meta:
         model = Branch
-        fields = '__all__'
+        fields = ['id', 'name', 'branch_code', 'location', 'company', 'company_name', 'user', 'user_details']
+        read_only_fields = ['id', 'company_name', 'user_details']
 
 class GSVRateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -73,21 +83,63 @@ class DurationFactorSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class CustomerSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True)
-    
+    user_details = UserSerializer(source='user', read_only=True)
+    password = serializers.CharField(write_only=True, required=False, style={'input_type': 'password'})
+    email = serializers.EmailField(required=True)
+
     class Meta:
         model = Customer
-        fields = '__all__'
-        depth = 10
-    
+        fields = [
+            'id', 'first_name', 'middle_name', 'last_name', 'email', 
+            'phone_number', 'address', 'profile_picture', 'gender', 
+            'user_details', 'password', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'user', 'user_details', 'created_at', 'updated_at']
+        extra_kwargs = {
+            'email': {
+                'validators': [
+                    UniqueValidator(queryset=Customer.objects.all())
+                ]
+            }
+        }
+
     def create(self, validated_data):
-        validated_data['password'] = make_password(validated_data.get('password'))
-        return super().create(validated_data)
+        password = validated_data.pop('password', None)
+        customer = Customer.objects.create(**validated_data)
+        
+        if password and customer.user:
+            customer.user.set_password(password)
+            customer.user.save(update_fields=['password'])
+        
+        return customer
 
     def update(self, instance, validated_data):
-        if 'password' in validated_data:
-            validated_data['password'] = make_password(validated_data.get('password'))
-        return super().update(instance, validated_data)
+        password = validated_data.pop('password', None)
+        
+        instance.first_name = validated_data.get('first_name', instance.first_name)
+        instance.middle_name = validated_data.get('middle_name', instance.middle_name)
+        instance.last_name = validated_data.get('last_name', instance.last_name)
+        instance.email = validated_data.get('email', instance.email)
+        instance.phone_number = validated_data.get('phone_number', instance.phone_number)
+        instance.address = validated_data.get('address', instance.address)
+        instance.profile_picture = validated_data.get('profile_picture', instance.profile_picture)
+        instance.gender = validated_data.get('gender', instance.gender)
+        instance.save()
+        
+        if instance.user:
+            user = instance.user
+            user.first_name = instance.first_name
+            user.last_name = instance.last_name
+            user.email = instance.email
+            user.phone = instance.phone_number
+            user.address = instance.address
+            
+            if password:
+                user.set_password(password)
+            
+            user.save()
+        
+        return instance
 
 class KYCSerializer(serializers.ModelSerializer):
     customer_name = serializers.ReadOnlyField(source='customer.get_full_name')
