@@ -1,5 +1,5 @@
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import re
 from rest_framework.authtoken.models import Token
 from django.db.models.signals import post_save  
