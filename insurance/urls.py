@@ -32,6 +32,7 @@ router.register(r'loan-repayments', views.LoanRepaymentViewSet)
 # The API URLs are now determined automatically by the router.
 urlpatterns = [
     path('', include(router.urls)), # Include the router-generated URLs
+    path('home/', views.HomeDataView.as_view(), name='api-home'),
     path('login/', views.CustomLoginView.as_view(), name='login'),
     path('logout/', views.LogoutView.as_view(), name='logout'),
 ]

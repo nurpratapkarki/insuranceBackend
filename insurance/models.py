@@ -16,6 +16,12 @@ from django.contrib.auth.models import (
     BaseUserManager,
     PermissionsMixin,
 )
+from django.utils.html import format_html # Import format_html for admin display
+
+# Define Fine Rate (as a percentage)
+# Consider moving this to settings.py if it needs to be globally configurable
+PREMIUM_FINE_RATE = Decimal('0.02') # Example: 2%
+
 class UserManager(BaseUserManager):
     def create_user(self, username, email, password=None, **extra_fields):
         if not email:
@@ -208,6 +214,58 @@ class InsurancePolicy(models.Model):
     description = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # --- Fields for Maturity Calculation (Stored as Decimals) ---
+    guaranteed_interest_rate = models.DecimalField(
+        max_digits=7, decimal_places=4, default=0.0000, # Allow slightly more digits for precision e.g. 0.0450
+        null=True, blank=True,
+        help_text="Guaranteed annual interest rate (e.g., 0.04 for 4%)."
+    )
+    terminal_bonus_rate = models.DecimalField(
+        max_digits=7, decimal_places=4, default=0.0000,
+        null=True, blank=True,
+        help_text="Terminal bonus rate as a percentage of Sum Assured (e.g., 0.10 for 10%)."
+    )
+    # --- End of stored fields ---
+    
+    # --- Properties for Percentage Display/Input ---
+    @property
+    def guaranteed_interest_rate_percent(self):
+        """Returns the guaranteed interest rate as a percentage."""
+        if self.guaranteed_interest_rate is not None:
+            return (self.guaranteed_interest_rate * 100).quantize(Decimal('0.01'))
+        return None
+
+    @guaranteed_interest_rate_percent.setter
+    def guaranteed_interest_rate_percent(self, value):
+        """Sets the guaranteed interest rate from a percentage."""
+        if value is not None:
+            try:
+                self.guaranteed_interest_rate = (Decimal(str(value)) / 100).quantize(Decimal('0.0001'))
+            except (TypeError, ValueError, InvalidOperation):
+                # Handle potential errors if input is not a valid number
+                self.guaranteed_interest_rate = None 
+        else:
+            self.guaranteed_interest_rate = None
+
+    @property
+    def terminal_bonus_rate_percent(self):
+        """Returns the terminal bonus rate as a percentage."""
+        if self.terminal_bonus_rate is not None:
+            return (self.terminal_bonus_rate * 100).quantize(Decimal('0.01'))
+        return None
+
+    @terminal_bonus_rate_percent.setter
+    def terminal_bonus_rate_percent(self, value):
+        """Sets the terminal bonus rate from a percentage."""
+        if value is not None:
+            try:
+                self.terminal_bonus_rate = (Decimal(str(value)) / 100).quantize(Decimal('0.0001'))
+            except (TypeError, ValueError, InvalidOperation):
+                self.terminal_bonus_rate = None
+        else:
+            self.terminal_bonus_rate = None
+    # --- End of properties ---
+
     def __str__(self):
         return self.name
 
@@ -221,6 +279,8 @@ class InsurancePolicy(models.Model):
             raise ValidationError(
                 "Base multiplier for Term insurance must always be 1.0."
             )
+    
+    # We don't need to override save(), the properties handle the conversion before save.
 
 #Guanteed Surrender Value Model
 class GSVRate(models.Model):
@@ -347,7 +407,7 @@ class SSVConfig(models.Model):
 
         if overlapping.exists():
             raise ValidationError("SSV year ranges cannot overlap for the same policy.")
-
+            
     def __str__(self):
         return (
             f"SSV Factor {self.ssv_factor}% for {self.min_year}-{self.max_year} years"
@@ -763,6 +823,69 @@ class PolicyHolder(models.Model):
             errors["customer"] = "Customer KYC is still pending approval."
         if errors:
             raise ValidationError(errors)
+
+    def calculate_actual_maturity_value(self) -> Decimal:
+        """Calculates the *actual* maturity value based on policy data and accrued bonuses."""
+        try:
+            if self.status != 'Active' and self.status != 'Matured': # Or whatever status indicates maturity eligibility
+                # Maybe return 0 or raise an error if not mature?
+                print(f"Policy {self.policy_number} is not yet mature or active.")
+                return Decimal("0.00")
+
+            policy = self.policy
+            sum_assured = self.sum_assured or Decimal('0.00')
+            policy_term = Decimal(str(self.duration_years)) if self.duration_years else Decimal('0')
+            
+            # Get the associated premium payment record (assuming one exists)
+            # We need annual_premium from it for guaranteed additions calculation
+            premium_payment = self.premium_payments.first() # Get the latest or first?
+            annual_premium = premium_payment.annual_premium if premium_payment else Decimal('0.00')
+
+            # --- Calculate Components --- 
+
+            # 1. Guaranteed Additions (Compound Interest on Annual Premium)
+            guaranteed_rate = policy.guaranteed_interest_rate if policy.guaranteed_interest_rate is not None else Decimal('0.0000')
+            guaranteed_additions_future_value = Decimal('0.00')
+            if guaranteed_rate > 0 and annual_premium > 0 and policy_term > 0:
+                # Future Value of an Ordinary Annuity: P * [((1 + r)^n - 1) / r]
+                try:
+                    future_value_factor = ((Decimal(1) + guaranteed_rate)**policy_term - Decimal(1)) / guaranteed_rate
+                    guaranteed_additions_future_value = annual_premium * future_value_factor
+                except InvalidOperation:
+                     # Handle potential calculation errors (e.g., overflow if term is huge)
+                     print(f"Error calculating future value factor for Policy {self.policy_number}")
+                     guaranteed_additions_future_value = annual_premium * policy_term # Fallback to total premium?
+            else:
+                # If no rate/term/premium, future value is just total premiums paid
+                 guaranteed_additions_future_value = annual_premium * policy_term
+
+            # 2. Actual Accrued Bonuses (Sum from related Bonus objects)
+            # Ensure bonuses are linked to PolicyHolder now
+            total_actual_bonus = self.bonuses.aggregate(total=Sum('accrued_amount'))['total'] or Decimal('0.00')
+
+            # 3. Terminal Bonus Component
+            terminal_rate = policy.terminal_bonus_rate if policy.terminal_bonus_rate is not None else Decimal('0.0000')
+            terminal_bonus_component = sum_assured * terminal_rate
+
+            # --- Total Actual Maturity Value --- 
+            # Sum Assured + Future Value of Guaranteed Additions + Actual Accrued Bonuses + Terminal Bonus
+            maturity_value = (
+                sum_assured + 
+                guaranteed_additions_future_value + # Total value (premium principal + interest)
+                total_actual_bonus + 
+                terminal_bonus_component
+            )
+            
+            # Consider product variations as noted in the estimated calculation
+
+            return maturity_value.quantize(Decimal("1.00"))
+
+        except Exception as e:
+            import traceback
+            print(f"Error calculating actual maturity value for PolicyHolder {self.id}: {e}")
+            traceback.print_exc() # Print detailed traceback
+            return Decimal("0.00")
+
     def save(self, *args, **kwargs):
         """Override save method to handle automatic field updates"""
         # Calculate age if date of birth is provided
@@ -801,17 +924,17 @@ class PolicyHolder(models.Model):
 #BonusRate Model
 class BonusRate(models.Model):
     year = models.PositiveIntegerField(
-        default=date.today().year,  # ✅ Default to current year
+        default=date.today().year,  
         help_text="Year the bonus rate applies to",
     )
     policy = models.ForeignKey(
         "InsurancePolicy", on_delete=models.CASCADE, related_name="bonus_rates"
     )
     min_year = models.PositiveIntegerField(
-        help_text="Minimum policy duration in years", default=1
+        help_text="Minimum policy duration in years for this rate", default=1
     )
     max_year = models.PositiveIntegerField(
-        help_text="Maximum policy duration in years", default=9
+        help_text="Maximum policy duration in years for this rate", default=9
     )
     bonus_per_thousand = models.DecimalField(
         max_digits=5,
@@ -821,24 +944,60 @@ class BonusRate(models.Model):
     )
 
     class Meta:
-        unique_together = [ "min_year", "max_year"]
-        ordering = ["min_year"]
+        # Updated unique_together constraint
+        unique_together = ['policy', 'year', 'min_year', 'max_year'] 
+        ordering = ["policy", "year", "min_year"] # Updated ordering
+
+    def clean(self):
+        """Ensure the year range is valid and does not overlap (or touch boundaries) with other ranges for the same policy and year."""
+        if self.min_year is None or self.max_year is None:
+             raise ValidationError("Minimum and Maximum year duration must be set.")
+        # Allow min_year == max_year for single-year duration, but not min > max
+        if self.min_year > self.max_year:
+            raise ValidationError({"max_year": "Maximum year must be greater than or equal to minimum year."}) 
+
+        # Check for overlapping ranges for the SAME policy and SAME year
+        # Filter out potential None values if policy or year are not set yet (though they should be required)
+        if self.policy is not None and self.year is not None:
+            overlapping_ranges = BonusRate.objects.filter(
+                policy=self.policy,
+                year=self.year,
+                min_year__lte=self.max_year, # Existing min <= New max
+                max_year__gte=self.min_year  # Existing max >= New min
+            ).exclude(pk=self.pk) # Exclude self if editing
+
+            if overlapping_ranges.exists():
+                overlaps = ", ".join([f"{o.min_year}-{o.max_year}" for o in overlapping_ranges])
+                raise ValidationError(
+                     f"The duration range {self.min_year}-{self.max_year} overlaps with existing range(s) [{overlaps}] "
+                     f"for this policy in year {self.year}."
+                 )
+        super().clean() # Call parent clean method
 
     def __str__(self):
-        return f"{self.policy_type}: {self.min_year}-{self.max_year} years -> {self.bonus_per_thousand} per 1000"
+        # Correctly access policy name and type through the relationship
+        policy_name = self.policy.name if self.policy else "No Policy"
+        return f"{policy_name} ({self.year}): {self.min_year}-{self.max_year} years -> {self.bonus_per_thousand} per 1000"
 
     @classmethod
     def get_bonus_rate(cls, policy, duration):
-        """Fetch the correct bonus rate based on policy  and duration."""
-        return cls.objects.filter(
-            policy=policy, min_year__lte=duration, max_year__gte=duration
-        ).first()
+        """Fetch the correct bonus rate based on policy and duration for the latest applicable year."""
+        # Find the latest year for which a rate exists for this policy and duration
+        latest_rate = cls.objects.filter(
+            policy=policy, 
+            min_year__lte=duration, 
+            max_year__gte=duration
+        ).order_by('-year').first()
+        return latest_rate # Return the whole object or just the rate? Returning object is more flexible
 
 #Bonus Model
 
 class Bonus(models.Model):
     customer = models.ForeignKey(
         Customer, on_delete=models.CASCADE, related_name="bonuses"
+    )
+    policy_holder = models.ForeignKey(
+        PolicyHolder, on_delete=models.CASCADE, related_name="bonuses"
     )
     bonus_type = models.CharField(
         max_length=20,
@@ -905,12 +1064,15 @@ class ClaimRequest(models.Model):
     claim_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     def calculate_claim_amount(self):
+        """Calculate the base claim amount, defaulting to 100% of Sum Assured."""
         if self.policy_holder and self.policy_holder.sum_assured:
-            return self.policy_holder.sum_assured * Decimal("0.60")
+            # Changed from 0.60 to 1.00 (or just return the sum_assured directly)
+            return self.policy_holder.sum_assured 
         return Decimal("0")
 
     def save(self, *args, **kwargs):
-        if not self.claim_amount:
+        # If claim_amount is not provided (or is 0), calculate the default
+        if not self.claim_amount or self.claim_amount == Decimal('0'): 
             self.claim_amount = self.calculate_claim_amount()
         super().save(*args, **kwargs)
 
@@ -991,28 +1153,63 @@ class PaymentProcessing(models.Model):
 
     def calculate_payout(self):
         """
-        Claim payout = Sum Assured + Bonuses - Outstanding Loans
+        Calculate the claim payout amount.
+        Base Payout = Sum Assured + Actual Accrued Bonuses - Total Outstanding Loan.
+        NOTE: Rider amounts (ADB/PTD) are NOT automatically added here and need specific logic 
+              based on claim reason if applicable.
         """
         try:
-            ph = self.claim_request.policy_holder
-            sum_assured = ph.sum_assured or 0
+            claim = self.claim_request
+            ph = claim.policy_holder
+            policy = ph.policy
 
-            total_bonus = ph.bonuses.aggregate(total=Sum("accrued_amount"))["total"] or 0
-            total_loan = ph.loans.aggregate(total=Sum("loan_amount"))["total"] or 0
+            # Base amount: Sum Assured
+            payout_base = ph.sum_assured or Decimal('0.00')
 
-            payout = Decimal(sum_assured) + Decimal(total_bonus) - Decimal(total_loan)
+            # --- START: Commented-out Rider Logic (Needs Refinement) --- 
+            # The logic below needs refinement based on specific claim reason and rider rules.
+            # It currently adds the full sum assured unconditionally if rider is included.
+            # if ph.include_adb: 
+            #     print(f"DEBUG: Adding ADB amount ({ph.sum_assured}) for claim {claim.id}")
+            #     payout_base += ph.sum_assured or Decimal('0.00')
+            # if ph.include_ptd:
+            #     print(f"DEBUG: Adding PTD amount ({ph.sum_assured}) for claim {claim.id}")
+            #     payout_base += ph.sum_assured or Decimal('0.00')
+            # --- END: Commented-out Rider Logic --- 
+
+            # Add Actual Accrued Bonuses (Sum from related Bonus objects)
+            total_actual_bonus = ph.bonuses.aggregate(total=Sum('accrued_amount'))['total'] or Decimal('0.00')
+
+            # Calculate Total Outstanding Loan Amount (Principal + Interest)
+            total_outstanding_loan = Decimal('0.00')
+            active_loans = ph.loans.filter(loan_status='Active')
+            for loan in active_loans:
+                total_outstanding_loan += (loan.remaining_balance + loan.accrued_interest)
+
+            # Final Payout Calculation (Current Active Logic)
+            payout = payout_base + total_actual_bonus - total_outstanding_loan
+            
+            # Ensure payout is not negative
+            payout = max(payout, Decimal('0.00')) 
+
             return payout.quantize(Decimal("1.00"))
 
         except Exception as e:
-            raise ValidationError(f"Error calculating payout: {e}")
+            import traceback
+            print(f"Error calculating payout for Claim Request {claim.id if claim else 'N/A'}: {e}")
+            traceback.print_exc()
+            return Decimal("0.00")
 
     def save(self, *args, **kwargs):
-        if not self.amount_paid:
+        # Calculate payout only if status is being set to Completed and amount_paid is not set yet
+        # Or perhaps recalculate whenever saved? Simpler: Recalculate on save if amount is 0.
+        if self.amount_paid == Decimal('0.00'): # Recalculate if 0
             self.amount_paid = self.calculate_payout()
         super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Payout for {self.claim_request.policy_holder}"
+
     class Meta:
         verbose_name = "Payment Processing"
         verbose_name_plural = "Payment Processings"
@@ -1115,10 +1312,15 @@ class PremiumPayment(models.Model):
         max_digits=12, decimal_places=2, default=0, editable=False
     )
     paid_amount = models.DecimalField(
-        max_digits=12, decimal_places=2, default=0
-    )  # Amount to be added
+        max_digits=12, decimal_places=2, default=0, 
+        help_text="Amount being paid in this transaction."
+    )
     next_payment_date = models.DateField(null=True, blank=True)
-    fine_due = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # Fine due represents the *accumulated* unpaid fine amount
+    fine_due = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0, 
+        help_text="Accumulated fine amount due."
+    )
     total_premium = models.DecimalField(
         max_digits=12, decimal_places=2, default=0, editable=False
     )
@@ -1134,6 +1336,27 @@ class PremiumPayment(models.Model):
     payment_status = models.CharField(
         max_length=255, choices=PAYMENT_CHOICES, default="Unpaid"
     )
+
+    def clean(self):
+        """Add validation for paid_amount."""
+        super().clean() # Call parent clean method
+        
+        # Ensure amounts are Decimal
+        paid_amount = Decimal(str(self.paid_amount)) if self.paid_amount is not None else Decimal('0.00')
+        interval_payment = Decimal(str(self.interval_payment)) if self.interval_payment is not None else Decimal('0.00')
+        fine_due = Decimal(str(self.fine_due)) if self.fine_due is not None else Decimal('0.00')
+
+        # Validate paid_amount against the amount currently due (interval + fine)
+        # Allow paying more only if the policy is already fully paid? (Could be complex)
+        # Simple approach: Don't allow paying more than interval + fine in one go unless it clears the total remaining.
+        amount_due_this_interval = interval_payment + fine_due
+        if paid_amount > amount_due_this_interval:
+            # Optional: Allow overpayment if it covers the total remaining premium + fine?
+            # total_remaining_with_fine = self.remaining_premium + fine_due
+            # if paid_amount > total_remaining_with_fine:
+            #     raise ValidationError(f"Paid amount ({paid_amount}) cannot exceed the total remaining premium plus fine ({total_remaining_with_fine}).")
+            # Simpler validation for now:
+             raise ValidationError(f"Paid amount ({paid_amount}) cannot exceed the current interval payment plus fine due ({amount_due_this_interval}).")
 
     def calculate_premium(self):
         """Calculate total and interval premiums for the policy."""
@@ -1154,7 +1377,7 @@ class PremiumPayment(models.Model):
             ).first()
 
             if not mortality_rate_obj:
-                return Decimal("0.00"), Decimal("0.00")  # Instead of returning None
+                return Decimal("0.00"), Decimal("0.00") # Ensure Decimal return
 
             mortality_rate = Decimal(mortality_rate_obj.rate)
 
@@ -1167,7 +1390,7 @@ class PremiumPayment(models.Model):
             ).first()
 
             if not duration_factor_obj:
-                return Decimal("0.00"), Decimal("0.00")  # Instead of returning None
+                return Decimal("0.00"), Decimal("0.00") # Ensure Decimal return
 
             duration_factor = Decimal(
                 duration_factor_obj.factor
@@ -1213,81 +1436,170 @@ class PremiumPayment(models.Model):
                 Decimal("1.00")
             )
 
-        except ValidationError as e:
-            raise ValidationError(f"Error calculating premium: {e}")
-
+        except Exception as e: # Catch generic exceptions too
+             print(f"Error calculating premium for PolicyHolder {self.policy_holder_id}: {e}")
+             # Consider logging the error properly
+             return Decimal("0.00"), Decimal("0.00") # Return default Decimals on error
 
     def save(self, *args, **kwargs):
-        if not self.pk:  # New instance
-            self.annual_premium, self.interval_payment = self.calculate_premium()
+        # Ensure amounts are Decimal
+        self.paid_amount = Decimal(str(self.paid_amount)) if self.paid_amount is not None else Decimal('0.00')
+        self.fine_due = Decimal(str(self.fine_due)) if self.fine_due is not None else Decimal('0.00')
 
+        # Calculate base premiums on first save
+        is_new = self.pk is None
+        if is_new:
+            self.annual_premium, self.interval_payment = self.calculate_premium()
             if self.policy_holder.payment_interval == "Single":
                 self.total_premium = self.interval_payment
             else:
-                self.total_premium = self.annual_premium * Decimal(
-                    str(self.policy_holder.duration_years)
-                )
+                self.total_premium = self.annual_premium * Decimal(str(self.policy_holder.duration_years))
+            # Set first payment date if not single payment
+            if self.policy_holder.payment_interval != "Single":
+                 self.next_payment_date = self.calculate_next_payment_date(self.policy_holder.start_date)
 
-        # Convert paid_amount to Decimal if it's not already
-        if isinstance(self.paid_amount, float):
-            self.paid_amount = Decimal(str(self.paid_amount))
+        # --- Fine Calculation (before processing payment) ---
+        # Check if payment is late and policy is not already fully paid
+        if self.next_payment_date and date.today() > self.next_payment_date and self.payment_status != 'Paid':
+            # Calculate fine based on interval payment (only if interval > 0)
+            if self.interval_payment > 0:
+                calculated_fine = (self.interval_payment * PREMIUM_FINE_RATE).quantize(Decimal('1.00'))
+                # Add fine only if it hasn't been added for this overdue period yet?
+                # Requires tracking last fine calculation date - complex. Simpler: Add if late.
+                self.fine_due += calculated_fine 
+                print(f"Applied fine of {calculated_fine} for late payment. Total fine due: {self.fine_due}")
+                # Optionally: update next_payment_date here if fine applies?
+                # Or let the regular next payment date logic handle it after payment.
 
-        # Handle new payment if paid_amount is provided
-        if self.paid_amount > 0:
-            if isinstance(self.total_paid, float):
-                self.total_paid = Decimal(str(self.total_paid))
-            self.total_paid += self.paid_amount
-            self.paid_amount = Decimal(
-                "0.00"
-            )  # Reset paid_amount after adding to total_paid
+        # --- Process Payment --- 
+        payment_made_this_save = self.paid_amount
+        if payment_made_this_save > 0:
+            # Decide how payment applies: Fine first, then principal? 
+            # Simple approach: Just add to total_paid. Fine is tracked separately.
+            self.total_paid += payment_made_this_save
+            # If payment covers outstanding fine, reduce fine_due
+            if payment_made_this_save >= self.fine_due:
+                 payment_after_fine = payment_made_this_save - self.fine_due
+                 self.fine_due = Decimal('0.00') 
+                 # What to do with payment_after_fine? Assume it covers interval payment.
+            else:
+                self.fine_due -= payment_made_this_save # Reduce fine by amount paid
 
-        # Update remaining premium and payment status
-        self.remaining_premium = max(
-            self.total_premium - self.total_paid, Decimal("0.00")
-        )
+            # Reset paid_amount for next transaction
+            self.paid_amount = Decimal("0.00")
 
-        if self.total_paid >= self.total_premium:
+            # --- Recalculate Next Payment Date after a payment is made --- 
+            if self.policy_holder.payment_interval != "Single" and self.payment_status != 'Paid':
+                 # Calculate based on the *previous* next_payment_date or start_date
+                 last_due_date = self.next_payment_date or self.policy_holder.start_date
+                 self.next_payment_date = self.calculate_next_payment_date(last_due_date)
+
+        # --- Update Statuses and Calculated Fields --- 
+        # Ensure total_premium and total_paid are Decimal
+        self.total_premium = Decimal(str(self.total_premium)) if self.total_premium is not None else Decimal('0.00')
+        self.total_paid = Decimal(str(self.total_paid)) if self.total_paid is not None else Decimal('0.00')
+        
+        self.remaining_premium = max(self.total_premium - self.total_paid, Decimal("0.00"))
+
+        if self.total_paid >= self.total_premium and self.total_premium > 0:
             self.payment_status = "Paid"
+            self.next_payment_date = None # No next date if fully paid
         elif self.total_paid > 0:
             self.payment_status = "Partially Paid"
         else:
             self.payment_status = "Unpaid"
 
-        # Handle fine
-        if self.fine_due > 0:
-            if isinstance(self.fine_due, float):
-                self.fine_due = Decimal(str(self.fine_due))
-            if isinstance(self.interval_payment, float):
-                self.interval_payment = Decimal(str(self.interval_payment))
-                self.interval_payment += self.fine_due
-                self.fine_due = Decimal("0.00")
+        # --- GSV/SSV Calculations --- 
+        # These methods should ideally handle potential missing data gracefully
+        try:
+            self.gsv_value = GSVRate.calculate_gsv(self)
+        except Exception as e:
+            print(f"Error calculating GSV: {e}")
+            self.gsv_value = Decimal('0.00')
+        try:
+             self.ssv_value = SSVConfig.calculate_ssv(self)
+        except Exception as e:
+            print(f"Error calculating SSV: {e}")
+            self.ssv_value = Decimal('0.00')
 
-        # Set next payment date
-        if (
-            not self.next_payment_date
-            and self.policy_holder.payment_interval != "Single"
-        ):
-            interval_months = {"quarterly": 3, "semi_annual": 6, "annual": 12}.get(
-                self.policy_holder.payment_interval
-            )
+        # Call full_clean to run validations (including our custom clean method)
+        self.full_clean()
 
-            if interval_months:
-                today = date.today()
-                self.next_payment_date = today.replace(
-                    month=((today.month - 1 + interval_months) % 12) + 1,
-                    year=today.year + ((today.month - 1 + interval_months) // 12),
-                )
-        # --- New GSV and SSV Calculations ---
-        self.gsv_value = GSVRate.calculate_gsv(self)
-        self.ssv_value = SSVConfig.calculate_ssv(self)
         super().save(*args, **kwargs)
+
+    def calculate_next_payment_date(self, base_date):
+        """Helper to calculate next payment date based on interval and a base date."""
+        if self.policy_holder.payment_interval == "Single":
+            return None
+           
+        interval_months = {"quarterly": 3, "semi_annual": 6, "annual": 12}.get(
+            self.policy_holder.payment_interval
+        )
+        if interval_months and base_date:
+            # Calculate months to add
+            total_months = base_date.month + interval_months
+            year_increase = (total_months - 1) // 12
+            new_month = (total_months - 1) % 12 + 1
+            new_year = base_date.year + year_increase
+            # Handle potential day issues (e.g., Feb 31)
+            # Find the last day of the target month
+            import calendar
+            last_day = calendar.monthrange(new_year, new_month)[1]
+            new_day = min(base_date.day, last_day)
+            return date(new_year, new_month, new_day)
+        return None # Return None if interval or base_date is invalid
+
+    # --- New method for Estimated Maturity Value ---
+    def calculate_estimated_maturity_value(self) -> Decimal:
+        """Calculates an *estimated* maturity value based on policy details."""
+        # Add check: If no policy_holder is associated yet, return 0
+        if not self.policy_holder:
+            return Decimal("0.00")
+            
+        try:
+            ph = self.policy_holder # ph assignment happens here
+            policy = ph.policy
+            # ... (rest of the try block remains the same) ...
+            sum_assured = ph.sum_assured or Decimal('0.00')
+            annual_premium = self.annual_premium or Decimal('0.00')
+            policy_term = Decimal(str(ph.duration_years)) if ph.duration_years else Decimal('0')
+
+            guaranteed_rate = policy.guaranteed_interest_rate if policy.guaranteed_interest_rate is not None else Decimal('0.0000')
+            terminal_rate = policy.terminal_bonus_rate if policy.terminal_bonus_rate is not None else Decimal('0.0000')
+            annual_bonus_rate = Decimal('0.045') 
+
+            if guaranteed_rate > 0 and annual_premium > 0 and policy_term > 0:
+                future_value_factor = ((Decimal(1) + guaranteed_rate)**policy_term - Decimal(1)) / guaranteed_rate
+                guaranteed_additions_future_value = annual_premium * future_value_factor
+            else:
+                guaranteed_additions_future_value = annual_premium * policy_term
+
+            annual_bonus_component = sum_assured * annual_bonus_rate * policy_term
+            terminal_bonus_component = sum_assured * terminal_rate
+
+            maturity_value = (
+                sum_assured + 
+                guaranteed_additions_future_value + 
+                annual_bonus_component + 
+                terminal_bonus_component
+            )
+            
+            return maturity_value.quantize(Decimal("1.00"))
+
+        except Exception as e:
+            # Safely access policy_holder id in except block
+            policy_holder_id = getattr(self.policy_holder, 'id', 'N/A') 
+            print(f"Error calculating estimated maturity value for PolicyHolder {policy_holder_id}: {e}")
+            # Optionally log the error
+            return Decimal("0.00")
+    # --- End of new method ---
 
     class Meta:
         verbose_name = "Premium Payment"
         verbose_name_plural = "Premium Payments"
 
     def __str__(self):
-        return f"Premium Payment has been ({self.payment_status})"
+        return f"Premium Payment for {self.policy_holder} ({self.payment_status})"
 
 #Agent report Model
 

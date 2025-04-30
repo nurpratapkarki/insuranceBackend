@@ -8,17 +8,19 @@ class InsuranceConfig(AppConfig):
     name = 'insurance'
     
     def ready(self):
-        # Import signals first to ensure they are registered
+        # Import the signals file directly
         import insurance.signals 
 
-        # Skip during migrations, tests, etc.
-        if 'runserver' not in sys.argv and 'accrue_interest' not in sys.argv:
-            return
+        # Restore original logic if needed, or keep commented if not required now
+        # # Skip during migrations, tests, etc.
+        # if 'runserver' not in sys.argv and 'accrue_interest' not in sys.argv:
+        #     return
         
-        # Add a custom command line argument to trigger interest accrual
-        if 'accrue_interest' in sys.argv:
-            self.accrue_daily_interest()
-    
+        # # Add a custom command line argument to trigger interest accrual
+        # if 'accrue_interest' in sys.argv:
+        #     self.accrue_daily_interest()
+        pass # Keep ready simple if the other logic isn't needed on every startup
+
     def accrue_daily_interest(self):
         """Accrue interest on all active loans"""
         from insurance.models import Loan  # Import here to avoid app registry issues

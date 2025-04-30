@@ -1,6 +1,9 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+from django.db.models import Sum
+from decimal import Decimal
+from django import forms
 
 from insurance.models import (
     Occupation, MortalityRate, Company, Branch, InsurancePolicy, GSVRate, SSVConfig,
@@ -103,15 +106,72 @@ class SSVConfigInline(admin.StackedInline):
     fields = ('min_year', 'max_year', 'ssv_factor', 'eligibility_years')
     verbose_name_plural = 'SSV Configurations'
 
+# --- Custom Form for InsurancePolicy Admin ---
+class InsurancePolicyAdminForm(forms.ModelForm):
+    # Define fields for percentage input
+    guaranteed_interest_rate_percent = forms.DecimalField(
+        max_digits=5, decimal_places=2, required=False,
+        help_text="Enter guaranteed interest rate as a percentage (e.g., 4.5 for 4.5%)."
+    )
+    terminal_bonus_rate_percent = forms.DecimalField(
+        max_digits=5, decimal_places=2, required=False,
+        help_text="Enter terminal bonus rate as a percentage (e.g., 10 for 10%)."
+    )
 
+    class Meta:
+        model = InsurancePolicy
+        # Include all fields from the model, plus our custom ones
+        # Exclude the underlying decimal fields as we manage them via the percent fields
+        exclude = ('guaranteed_interest_rate', 'terminal_bonus_rate') 
+        fields = '__all__' # Or list all required fields explicitly
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Populate initial values for percent fields if instance exists
+        if self.instance and self.instance.pk:
+            self.fields['guaranteed_interest_rate_percent'].initial = self.instance.guaranteed_interest_rate_percent
+            self.fields['terminal_bonus_rate_percent'].initial = self.instance.terminal_bonus_rate_percent
+
+    def save(self, commit=True):
+        # Get cleaned data for percent fields
+        guaranteed_percent = self.cleaned_data.get('guaranteed_interest_rate_percent')
+        terminal_percent = self.cleaned_data.get('terminal_bonus_rate_percent')
+
+        # Use the model property setters to update the underlying decimal fields
+        self.instance.guaranteed_interest_rate_percent = guaranteed_percent
+        self.instance.terminal_bonus_rate_percent = terminal_percent
+
+        # Call the parent save method to save the instance
+        return super().save(commit=commit)
+# --- End Custom Form ---
 
 @admin.register(InsurancePolicy)
 class InsurancePolicyAdmin(admin.ModelAdmin):
+    form = InsurancePolicyAdminForm
     list_display = ('name', 'policy_code', 'policy_type', 'base_multiplier', 'min_sum_assured', 'max_sum_assured')
     search_fields = ('name', 'policy_code')
     list_filter = ('policy_type', 'include_adb', 'include_ptd')
     readonly_fields = ('created_at',)
     inlines = [GSVRateInline, SSVConfigInline]
+    
+    fieldsets = (
+        ('Policy Details', {
+            'fields': ('name', 'policy_code', 'policy_type', 'description')
+        }),
+        ('Financial Parameters', {
+            'fields': ('base_multiplier', 'min_sum_assured', 'max_sum_assured')
+        }),
+        ('Rider Options', {
+            'fields': ('include_adb', 'adb_percentage', 'include_ptd', 'ptd_percentage')
+        }),
+        ('Maturity Calculation Rates (%)', {
+            'fields': ('guaranteed_interest_rate_percent', 'terminal_bonus_rate_percent')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at',), 
+            'classes': ('collapse',)
+        }),
+    )
 
 
 
@@ -146,25 +206,37 @@ class AgentApplicationAdmin(admin.ModelAdmin):
     )
 
 
+class AgentReportInline(admin.TabularInline):
+    model = AgentReport
+    extra = 0
+    fields = ('report_date', 'policies_sold', 'total_premium', 'commission_earned')
+    readonly_fields = ('report_date', 'policies_sold', 'total_premium', 'commission_earned')
+    verbose_name_plural = 'Agent Reports'
+
 @admin.register(SalesAgent)
 class SalesAgentAdmin(admin.ModelAdmin):
-    list_display = ('get_agent_name', 'agent_code', 'branch', 'joining_date', 'is_active', 'status')
+    list_display = ('get_agent_name', 'agent_code', 'branch', 'joining_date', 'is_active', 'status', 'get_total_commission_earned')
     search_fields = ('agent_code', 'application__first_name', 'application__last_name', 'application__email')
     list_filter = ('branch', 'is_active', 'status', 'joining_date')
-    readonly_fields = ('id', 'total_policies_sold', 'total_premium_collected', 'last_policy_date')
-    
+    readonly_fields = ('id', 'total_policies_sold', 'total_premium_collected', 'last_policy_date', 'get_total_commission_earned')
+    inlines = [AgentReportInline]
     def get_agent_name(self, obj):
         if obj.application:
             return f"{obj.application.first_name} {obj.application.last_name}"
         return obj.agent_code
     get_agent_name.short_description = 'Agent Name'
     
+    def get_total_commission_earned(self, obj):
+        total = obj.agentreport_set.aggregate(total_commission=Sum('commission_earned'))['total_commission']
+        return total if total is not None else Decimal('0.00')
+    get_total_commission_earned.short_description = 'Total Commission Earned'
+    
     fieldsets = (
         ('Basic Information', {
             'fields': ('application', 'agent_code', 'branch', 'is_active', 'status')
         }),
         ('Commission Details', {
-            'fields': ('commission_rate',)
+            'fields': ('commission_rate', 'get_total_commission_earned')
         }),
         ('Employment Dates', {
             'fields': ('joining_date', 'termination_date', 'termination_reason')
@@ -175,10 +247,9 @@ class SalesAgentAdmin(admin.ModelAdmin):
     )
 
 
-class BonusInline(admin.TabularInline):
+class BonusInline(admin.StackedInline):
     model = Bonus
     extra = 0
-    fields = ('bonus_type', 'accrued_amount', 'start_date')
     readonly_fields = ('accrued_amount',)
     verbose_name_plural = 'Bonuses'
 
@@ -198,7 +269,7 @@ class KYCInline(admin.StackedInline):
 class PolicyHolderInline(admin.StackedInline):
     model = PolicyHolder
     extra = 0
-    readonly_fields = ('policy_number', 'start_date', 'maturity_date')
+    readonly_fields = ('policy_number',  'maturity_date')
     can_delete = False
     verbose_name_plural = 'policies'
 
@@ -281,18 +352,15 @@ class UnderwritingAdmin(admin.ModelAdmin):
 
 @admin.register(PremiumPayment)
 class PremiumPaymentAdmin(admin.ModelAdmin):
-    list_display = ('policy_holder', 'annual_premium', 'total_paid', 'next_payment_date', 'payment_status')
+    list_display = ('policy_holder', 'annual_premium', 'total_paid', 'next_payment_date', 'payment_status', 'estimated_maturity_value_display')
     search_fields = ('policy_holder__policy_number', 'policy_holder__customer__first_name')
     list_filter = ('payment_status',)
-    readonly_fields = ('annual_premium', 'interval_payment', 'total_paid', 'total_premium', 
-                       'remaining_premium', 'gsv_value', 'ssv_value')
+    readonly_fields = ('annual_premium', 'interval_payment', 'total_paid', 'total_premium', 'next_payment_date', 'estimated_maturity_value_display')
 
-
-@admin.register(AgentReport)
-class AgentReportAdmin(admin.ModelAdmin):
-    list_display = ('agent', 'branch', 'report_date', 'policies_sold', 'total_premium', 'commission_earned')
-    search_fields = ('agent__agent_code', 'agent__application__first_name')
-    list_filter = ('branch', 'report_date')
+    def estimated_maturity_value_display(self, obj):
+        value = obj.calculate_estimated_maturity_value()
+        return f"Rs. {value:,.2f}" if value else "N/A"
+    estimated_maturity_value_display.short_description = 'Estimated Maturity Value'
 
 
 @admin.register(Loan)

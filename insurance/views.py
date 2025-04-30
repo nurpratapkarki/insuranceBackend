@@ -515,3 +515,41 @@ class LogoutView(APIView):
         except (AttributeError, Token.DoesNotExist):
             pass # Handle cases where token might not exist or user isn't authenticated via token
         return Response({"detail": "Logged out successfully."}, status=status.HTTP_200_OK)
+
+
+class HomeDataView(APIView):
+ 
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        serializer_context = {'request': request} # For serializers needing request context
+        
+        # Fetch and serialize all data for each model
+        all_data = {
+            "users": UserSerializer(User.objects.all(), many=True, context=serializer_context).data,
+            "occupations": OccupationSerializer(Occupation.objects.all(), many=True, context=serializer_context).data,
+            "mortality_rates": MortalityRateSerializer(MortalityRate.objects.all(), many=True, context=serializer_context).data,
+            "companies": CompanySerializer(Company.objects.all(), many=True, context=serializer_context).data,
+            "branches": BranchSerializer(Branch.objects.all(), many=True, context=serializer_context).data,
+            "insurance_policies": InsurancePolicySerializer(InsurancePolicy.objects.all(), many=True, context=serializer_context).data,
+            "gsv_rates": GSVRateSerializer(GSVRate.objects.all(), many=True, context=serializer_context).data,
+            "ssv_configs": SSVConfigSerializer(SSVConfig.objects.all(), many=True, context=serializer_context).data,
+            "agent_applications": AgentApplicationSerializer(AgentApplication.objects.all(), many=True, context=serializer_context).data,
+            "sales_agents": SalesAgentSerializer(SalesAgent.objects.all(), many=True, context=serializer_context).data,
+            "duration_factors": DurationFactorSerializer(DurationFactor.objects.all(), many=True, context=serializer_context).data,
+            "customers": CustomerSerializer(Customer.objects.all(), many=True, context=serializer_context).data,
+            "kyc": KYCSerializer(KYC.objects.all(), many=True, context=serializer_context).data,
+            "policy_holders": PolicyHolderSerializer(PolicyHolder.objects.all(), many=True, context=serializer_context).data,
+            "bonus_rates": BonusRateSerializer(BonusRate.objects.all(), many=True, context=serializer_context).data,
+            "bonuses": BonusSerializer(Bonus.objects.all(), many=True, context=serializer_context).data,
+            "claim_requests": ClaimRequestSerializer(ClaimRequest.objects.all(), many=True, context=serializer_context).data,
+            "claim_processing": ClaimProcessingSerializer(ClaimProcessing.objects.all(), many=True, context=serializer_context).data,
+            "payment_processing": PaymentProcessingSerializer(PaymentProcessing.objects.all(), many=True, context=serializer_context).data,
+            "underwriting": UnderwritingSerializer(Underwriting.objects.all(), many=True, context=serializer_context).data,
+            "premium_payments": PremiumPaymentSerializer(PremiumPayment.objects.all(), many=True, context=serializer_context).data,
+            "agent_reports": AgentReportSerializer(AgentReport.objects.all(), many=True, context=serializer_context).data,
+            "loans": LoanSerializer(Loan.objects.all(), many=True, context=serializer_context).data,
+            "loan_repayments": LoanRepaymentSerializer(LoanRepayment.objects.all(), many=True, context=serializer_context).data,
+        }
+
+        return Response(all_data)
