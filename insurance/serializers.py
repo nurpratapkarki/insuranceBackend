@@ -147,6 +147,7 @@ class KYCSerializer(serializers.ModelSerializer):
     class Meta:
         model = KYC
         fields = '__all__'
+        depth = 10
 
 class PolicyHolderSerializer(serializers.ModelSerializer):
     customer_name = serializers.SerializerMethodField()

@@ -50,6 +50,7 @@ INSTALLED_APPS = [
 
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -80,8 +81,36 @@ TEMPLATES = [
 # CORS settings
 
 CORS_ALLOWED_ORIGINS = [
-    "http://192.168.18.4:8000",
-   
+    "http://192.168.1.80:8080",
+    "http://localhost:8080",
+    "http://192.168.0.105:8000",
+
+    
+]
+
+# Allow credentials (cookies, authorization headers)
+
+# Allow these headers in requests
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
+
+# Allow these methods
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
 ]
 
 CORS_ALLOW_CREDENTIALS = True
