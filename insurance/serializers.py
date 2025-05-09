@@ -10,6 +10,7 @@ from insurance.models import (
 
 
 class UserSerializer(serializers.ModelSerializer):
+    depth = 1
     class Meta:
         model = User
         fields = '__all__'
@@ -33,11 +34,32 @@ class BranchSerializer(serializers.ModelSerializer):
     company_name = serializers.ReadOnlyField(source='company.name')
     user_details = UserSerializer(source='user', read_only=True)
     user = serializers.PrimaryKeyRelatedField(queryset=User.objects.filter(user_type='branch'), required=False, allow_null=True)
-    
+    total_agents = serializers.SerializerMethodField()
+    total_policy_holders = serializers.SerializerMethodField()
+    total_policies = serializers.SerializerMethodField()
+    total_premium = serializers.SerializerMethodField()
     class Meta:
         model = Branch
-        fields = ['id', 'name', 'branch_code', 'location', 'company', 'company_name', 'user', 'user_details']
+        fields = ['id', 'name', 'branch_code', 'location', 'company', 'company_name', 'user', 'user_details','total_agents',
+            'total_policy_holders',
+            'total_policies',
+            'total_premium',]
         read_only_fields = ['id', 'company_name', 'user_details']
+    def get_total_agents(self, obj):
+        return SalesAgent.objects.filter(branch=obj).count()
+
+    def get_total_policy_holders(self, obj):
+        return PolicyHolder.objects.filter(branch=obj).count()
+
+    def get_total_policies(self, obj):
+        return PolicyHolder.objects.filter(branch=obj).count()
+
+    def get_total_premium(self, obj):
+        from django.db.models import Sum
+        return PremiumPayment.objects.filter(policy_holder__branch=obj).aggregate(
+            total=Sum('total_paid')
+        )['total'] or 0
+
 
 class GSVRateSerializer(serializers.ModelSerializer):
     class Meta:
@@ -59,7 +81,7 @@ class InsurancePolicySerializer(serializers.ModelSerializer):
 
 class AgentApplicationSerializer(serializers.ModelSerializer):
     branch_name = serializers.ReadOnlyField(source='branch.name')
-    
+    depth = 2
     class Meta:
         model = AgentApplication
         fields = '__all__'
@@ -67,7 +89,7 @@ class AgentApplicationSerializer(serializers.ModelSerializer):
 class SalesAgentSerializer(serializers.ModelSerializer):
     branch_name = serializers.ReadOnlyField(source='branch.name')
     agent_name = serializers.SerializerMethodField()
-    
+    depth = 2
     class Meta:
         model = SalesAgent
         fields = '__all__'
@@ -256,8 +278,9 @@ class PremiumPaymentSerializer(serializers.ModelSerializer):
 
 class AgentReportSerializer(serializers.ModelSerializer):
     agent_name = serializers.SerializerMethodField()
+    agent = SalesAgentSerializer(read_only=True)
     branch_name = serializers.ReadOnlyField(source='branch.name')
-    
+    depth = 2
     class Meta:
         model = AgentReport
         fields = '__all__'

@@ -82,10 +82,10 @@ TEMPLATES = [
 
 CORS_ALLOWED_ORIGINS = [
     "http://192.168.1.80:8080",
+    "http://192.168.18.4:8080",
     "http://localhost:8080",
-    "http://192.168.0.105:8000",
-
-    
+    "http://192.168.18.225:8080",
+    "http://192.168.0.105:8000",  
 ]
 
 # Allow credentials (cookies, authorization headers)
@@ -192,7 +192,7 @@ REST_FRAMEWORK = {
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Asia/Kathmandu'
 
 USE_I18N = True
 

@@ -90,20 +90,20 @@ def policy_holder_post_save(sender, instance, created, **kwargs):
         print(f"Error in policy_holder_post_save signal: {str(e)}")
 
 # Signal handlers for PolicyHolder model to create underwriting
-# @receiver(post_save, sender=PolicyHolder)
-# def create_or_update_underwriting(sender, instance, created, **kwargs):
-#     """Create or update underwriting for active or pending policyholders."""
-#     # Avoid infinite recursion by skipping updates caused by the signal itself
-#     if getattr(instance, '_from_signal', False):
-#         return
-#     
-#     if instance.status in ['Pending', 'Active']:
-#         underwriting, _ = Underwriting.objects.get_or_create(policy_holder=instance)
-# 
-#         # Save underwriting without triggering PolicyHolder updates
-#         underwriting._from_signal = True
-#         underwriting.save()
-#         underwriting._from_signal = False
+@receiver(post_save, sender=PolicyHolder)
+def create_or_update_underwriting(sender, instance, created, **kwargs):
+    """Create or update underwriting for active or pending policyholders."""
+    # Avoid infinite recursion by skipping updates caused by the signal itself
+    if getattr(instance, '_from_signal', False):
+        return
+    
+    if instance.status in ['Pending', 'Active']:
+        underwriting, _ = Underwriting.objects.get_or_create(policy_holder=instance)
+
+        # Save underwriting without triggering PolicyHolder updates
+        underwriting._from_signal = True
+        underwriting.save()
+        underwriting._from_signal = False
 
 # Signal handlers for PolicyHolder model to update agent statistics
 print("--- insurance/signals.py: Before @receiver for update_agent_stats_on_new_policy ---")
@@ -164,45 +164,45 @@ def handle_policy_renewal(sender, instance, created, **kwargs):
         print(f"Error in handle_policy_renewal signal: {str(e)}")
 
 # Signal handlers for PolicyHolder model to trigger bonus on anniversary
-# @receiver(post_save, sender=PolicyHolder)
-# def trigger_bonus_on_anniversary(sender, instance, created, **kwargs):
-#     """Automatically credit bonus if the policy is over one year old."""
-#     today = date.today()
-# 
-#     # Ensure the policy is active and at least one year old
-#     if instance.status == 'Active' and (today - instance.start_date).days >= 365:
-#         # Check if a bonus already exists for the current year
-#         if not Bonus.objects.filter(policy_holder=instance, start_date__year=today.year).exists():
-#             try:
-#                 # Create the bonus for the current year
-#                Bonus.objects.create(
-#                     policy_holder=instance,
-#                     bonus_type='SI',  # Assuming Simple Interest as default
-#                     start_date=today
-#                 )
-#                 # The bonus is calculated and saved in the Bonus model's save method
-#             except Exception as e:
-#                 print(f"Error creating bonus: {e}")
-# 
-#     # Handle backdated policies (if start_date is updated)
-#     if not created and instance.start_date:
-#         # Calculate the years since the policy started
-#         start_year = instance.start_date.year
-#         current_year = today.year
-# 
-#         for year in range(start_year + 1, current_year + 1):
-#             # Check if a bonus already exists for the year
-#             if not Bonus.objects.filter(policy_holder=instance, start_date__year=year).exists():
-#                 try:
-#                     # Credit bonus for the year
-#                     Bonus.objects.create(
-#                         policy_holder=instance,
-#                         bonus_type='SI',
-#                         start_date=date(year, instance.start_date.month, instance.start_date.day)
-#                     )
-#                     # The bonus is calculated and saved in the Bonus model's save method
-#                 except Exception as e:
-#                     print(f"Error creating bonus for year {year}: {e}")
+@receiver(post_save, sender=PolicyHolder)
+def trigger_bonus_on_anniversary(sender, instance, created, **kwargs):
+    """Automatically credit bonus if the policy is over one year old."""
+    today = date.today() 
+
+    # Ensure the policy is active and at least one year old
+    if instance.status == 'Active' and (today - instance.start_date).days >= 365:
+        # Check if a bonus already exists for the current year
+        if not Bonus.objects.filter(policy_holder=instance, start_date__year=today.year).exists():
+            try:
+                # Create the bonus for the current year
+               Bonus.objects.create(
+                    policy_holder=instance,
+                    bonus_type='SI',  # Assuming Simple Interest as default
+                    start_date=today
+                )
+                # The bonus is calculated and saved in the Bonus model's save method
+            except Exception as e:
+                print(f"Error creating bonus: {e}")
+
+    # Handle backdated policies (if start_date is updated)
+    if not created and instance.start_date:
+        # Calculate the years since the policy started
+        start_year = instance.start_date.year
+        current_year = today.year
+
+        for year in range(start_year + 1, current_year + 1):
+            # Check if a bonus already exists for the year
+            if not Bonus.objects.filter(policy_holder=instance, start_date__year=year).exists():
+                try:
+                    # Credit bonus for the year
+                    Bonus.objects.create(
+                        policy_holder=instance,
+                        bonus_type='SI',
+                        start_date=date(year, instance.start_date.month, instance.start_date.day)
+                    )
+                    # The bonus is calculated and saved in the Bonus model's save method
+                except Exception as e:
+                    print(f"Error creating bonus for year {year}: {e}")
 
 # Signal handlers for PolicyHolder model to clean up related records
 @receiver(pre_delete, sender=PolicyHolder)

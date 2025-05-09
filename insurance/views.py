@@ -5,6 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.views import ObtainAuthToken
+from django.db.models import Sum
 
 from insurance.models import (
     Occupation, MortalityRate, Company, Branch, InsurancePolicy, GSVRate, SSVConfig,
@@ -216,6 +217,23 @@ class AgentReportViewSet(viewsets.ModelViewSet):
     queryset = AgentReport.objects.all()
     serializer_class = AgentReportSerializer
     permission_classes = [IsAuthenticated] # Only Admin/Branch Admin manage agent reports
+    def retrieve(self, request, pk=None):
+        try:
+            agent = SalesAgent.objects.get(pk=pk)
+        except SalesAgent.DoesNotExist:
+            return Response({'error': 'Agent not found'}, status=404)
+
+        policies_sold = PolicyHolder.objects.filter(agent_id=agent).count()
+        total_premium = PremiumPayment.objects.filter(
+            policy_holder__agent_id=agent
+        ).aggregate(total=Sum('paid_amount'))['total'] or 0
+
+        data = {
+            'agent': SalesAgentSerializer(agent).data,
+            'policies_sold': policies_sold,
+            'total_premium': total_premium,
+        }
+        return Response(data)
 
 class LoanViewSet(viewsets.ModelViewSet):
     queryset = Loan.objects.all()
@@ -297,7 +315,7 @@ class LogoutView(APIView):
 
 class HomeDataView(APIView):
  
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     def get(self, request):
         serializer_context = {'request': request} # For serializers needing request context

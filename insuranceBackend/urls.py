@@ -19,10 +19,12 @@ from django.urls import path, include
 from django.conf import settings
 from insuranceBackend.settings import MEDIA_ROOT, MEDIA_URL
 from django.conf.urls.static import static
+from insurance.views import HomeDataView
 
 urlpatterns = [
     path('api/', include('insurance.urls')), 
     # path('', admin.site.urls),
+     path('api/home/', HomeDataView.as_view(), name='home'),
     path('api-auth/', include('rest_framework.urls')),
 ] 
 
